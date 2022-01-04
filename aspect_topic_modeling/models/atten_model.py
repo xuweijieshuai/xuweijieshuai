@@ -23,6 +23,8 @@ class MODEL_ATT_COMP(nn.Module):
         self.sqrtdk = torch.tensor([d_key**0.5]).to(device)
     
     def loss_max_margin_neg_sample(self, x):
+        """Maximize word level embedding reconstruction with negative sampling
+        """
         word_repre_x = normalize(self.word_repre, dim = 2) #batch n dvalue
         value_recon_x = normalize(self.value_recon, dim = 2) #batch n dvalue
         sim_matrix = torch.matmul(word_repre_x, value_recon_x.transpose(2,1)) #batch n n
@@ -33,18 +35,32 @@ class MODEL_ATT_COMP(nn.Module):
         return loss
 
     def loss_word_prediction_no_self(self, x):
-        #model.compute(x)
-        #x = self.embeddings(x)
+        """Maximize word distribution reconstruction without given word
+        """
         word_recon_no_self_normalized = normalize(self.word_recon_no_self, dim = 2) #batch n d_word
         x_normalized = normalize(x, dim = 2).transpose(2,1) #batch d_word n 
         sim_matrix = torch.matmul(word_recon_no_self_normalized, x_normalized) #batch n n
         return 1 - torch.diagonal(sim_matrix, 0, 1, 2).mean(1) #batch 
 
     def reconstruction_loss(self):
+        """Sparsity/Entropy loss to make sure each word goes to 1 topic
+        """
         distribution = self.topic_weight
         return - torch.log(distribution) * distribution
     
+    def sinkhorn_distance(self, lambda_sh = 1):
+        """Make sure sentence goes to less topics and documents are uniformly distributed to each topics
+        """
+        sentence_topic = self.topic_weight.mean(1)
+        a = torch.ones(sentence_topic.shape[0]).to(device) * sentence_topic.shape[1] / sentence_topic.shape[0] #batch dimension
+        b = torch.ones(sentence_topic.shape[1]).to(device)  #topics dimension 
+        #print(a.shape, b.shape)
+        return sinkhorn_torch( - torch.log(sentence_topic), a, b, lambda_sh).sum()
+    
+    
     def similarity_loss(self):
+        """If word has high attention on another word, they should have similar topics distribution
+        """
         d1, d2, d3 = self.att_weight.shape
         normal_weights = self.att_weight.reshape(-1, d3) # batch * n n
         samples = torch.multinomial(normal_weights, 1).reshape(-1) #batch * n
@@ -68,7 +84,8 @@ class MODEL_ATT_COMP(nn.Module):
     
     def forward(self,x):
         '''
-        x: tensor, n by d_word
+        x: tensor, batch by n
+        Output: a dictionary that contains different loss
         '''
         x = self.embeddings(x) #batch n d_word
         self.k = self.K(x).transpose(2,1) #batch d_key n 
@@ -91,11 +108,13 @@ class MODEL_ATT_COMP(nn.Module):
         margin_loss = self.loss_max_margin_neg_sample(x).sum()
         recon_loss = self.reconstruction_loss().mean(1).sum()
         sim_loss = self.similarity_loss().sum()
+        sinkhorn_loss = self.sinkhorn_distance()
         return {
             'loss' : word_pred_loss + margin_loss,
             'margin_loss': margin_loss,
             'word_loss': word_pred_loss,
             'reconstruct_loss': recon_loss,
-            'similarity_loss': sim_loss
+            'similarity_loss': sim_loss,
+            'sinkhorn_loss': sinkhorn_loss
             
         }
