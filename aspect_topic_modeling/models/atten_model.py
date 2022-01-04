@@ -4,7 +4,8 @@
 import torch
 import torch.nn as nn
 from torch.nn.functional import normalize
-cuda = torch.device('cuda') 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 class MODEL_ATT_COMP(nn.Module):
     def __init__(self, d_word, d_key, d_value,n_topic, embeddings):
