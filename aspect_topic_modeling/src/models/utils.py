@@ -108,7 +108,7 @@ def generate_emb(vec_file, common_words, emb_size = 50):
 
         return embeddings
     
-def train(model, X, batch_size, epoch, optimizer):
+def train(model, X, batch_size, epoch, optimizer, scheduler):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.train()
     total_nll = 0.0
@@ -129,7 +129,7 @@ def train(model, X, batch_size, epoch, optimizer):
         
         total_nll += d['rec_loss'].sum().item() / batch_size
         total_kld += d['kld'].sum().item() / batch_size  
-        #total_penalty += d['penalty'].sum().item() / batch_size  
+        total_penalty += d['prior']  
 #         if i < 3:
 #             loss = d['minus_elbo']
 #         else:
@@ -138,8 +138,8 @@ def train(model, X, batch_size, epoch, optimizer):
         optimizer.zero_grad()
         loss.sum().backward()
         optimizer.step()
-
-    print(total_nll/length, total_kld/length)
+        scheduler.step()
+    print(total_nll/length, total_kld/length, total_penalty/length)
 
 def get_common_words(common_words_ct, ct = 40):
         #         if self.common_words == None:
