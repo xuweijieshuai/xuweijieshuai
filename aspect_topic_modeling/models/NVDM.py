@@ -73,7 +73,7 @@ class NTM(nn.Module):
             z = self.h_to_z(z)
             self.output = z
             #print(z)
-            z = self.drop(z)
+            #z = self.drop(z)
             #get log probability for reconstruction loss
             log_prob = self.topics(z)
             rec_loss = rec_loss - (log_prob * x).sum(dim=-1)
@@ -88,6 +88,10 @@ class NTM(nn.Module):
             'rec_loss': rec_loss,
             'kld': kld
         }
+
+    def get_topics(self):
+        return self.topics.get_topics()
+
 
 
 def topic_embedding_weighted_penalty(embedding_weight, topic_word_logit, EPS=1e-12):
