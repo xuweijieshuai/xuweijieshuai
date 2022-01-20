@@ -4,6 +4,11 @@ from torch import nn
 from torch.nn import init
 from torch.nn import functional as F
 from torch.nn.functional import normalize
+import sys
+#change to any directory you have to store the repo
+sys.path.insert(1, '/home/ec2-user/SageMaker/github/aspect_topic_modeling')
+from src.models.utils import get_wordnet_pos, remove_stopWords, get_emb, generate_emb, train, kld_normal, get_common_words, generate_bow
+
 
 def sinkhorn_torch(M, a, b, lambda_sh, numItermax=5000, stopThr=.5e-2, cuda=False):    
 
@@ -41,6 +46,49 @@ def topic_covariance_penalty(topic_emb, EPS=1e-12):
     var = ((cosine - mean) ** 2).mean()
     return mean - var, var, mean
 
+class NTM(nn.Module):
+    """NTM that keeps track of output
+    """
+    def __init__(self, hidden, normal, h_to_z, topics):
+        super(NTM, self).__init__()
+        self.hidden = hidden
+        self.normal = normal
+        self.h_to_z = h_to_z
+        self.topics = topics
+        self.output = None
+        self.drop = nn.Dropout(p=0.5)
+    def forward(self, x, n_sample=1):
+        h = self.hidden(x)
+        h = self.drop(h)
+        mu, log_sigma = self.normal(h)
+        #identify how far it is away from normal distribution
+        kld = kld_normal(mu, log_sigma)
+        #print(kld.shape)
+        rec_loss = 0
+        for i in range(n_sample):
+            #reparametrician trick
+            z = torch.zeros_like(mu).normal_() * torch.exp(0.5*log_sigma) + mu
+            #decode
+            
+            z = self.h_to_z(z)
+            self.output = z
+            #print(z)
+            z = self.drop(z)
+            #get log probability for reconstruction loss
+            log_prob = self.topics(z)
+            rec_loss = rec_loss - (log_prob * x).sum(dim=-1)
+        #average reconstruction loss
+        rec_loss = rec_loss / n_sample
+        #print(rec_loss.shape)
+        minus_elbo = rec_loss + kld
+
+        return {
+            'loss': minus_elbo,
+            'minus_elbo': minus_elbo,
+            'rec_loss': rec_loss,
+            'kld': kld
+        }
+
 
 def topic_embedding_weighted_penalty(embedding_weight, topic_word_logit, EPS=1e-12):
     """embedding_weight: V x dim, topic_word_logit: T x V."""
@@ -58,7 +106,7 @@ def topic_embedding_weighted_penalty(embedding_weight, topic_word_logit, EPS=1e-
     #we want normalized importance is closed their similarity
     return -(s * nw).sum()  # minus for minimization
 
-def negative_sampling_prior(softmax_top, index, embedding,
+def negative_sampling_prior(softmax_top, index, embedding, epoch,
                            beta = 1, gamma = 1, iter2 = 30, sample = 20):
     """ add prior as a semi-supervised loss
     
@@ -211,7 +259,7 @@ class NSSTM(NTM):
         if self.index == [] or epoch < self.iter1:
             self.ppenalty = 0
         else:
-            self.ppenalty = negative_sampling_prior(self.topics.get_topics(),self.index, self.topics.embedding,
+            self.ppenalty = negative_sampling_prior(self.topics.get_topics(),self.index, self.topics.embedding, epoch,
                                                    self.beta, self.gamma, self.iter2, self.sample)
         dpenalty, _, _ = topic_covariance_penalty(self.topics.topic_emb)
         stat.update({
@@ -340,3 +388,82 @@ class OTETM(NTM):
         })
 
         return stat
+
+class NormalParameter(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(NormalParameter, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.mu = nn.Linear(in_features, out_features)
+        self.log_sigma = nn.Linear(in_features, out_features)
+        self.reset_parameters()
+
+    def forward(self, h):
+        return self.mu(h), self.log_sigma(h)
+
+    def reset_parameters(self):
+        init.zeros_(self.log_sigma.weight)
+        init.zeros_(self.log_sigma.bias)
+
+
+
+class Sequential(nn.Sequential):
+    """Wrapper for torch.nn.Sequential."""
+    def __init__(self, args):
+        super(Sequential, self).__init__(args)
+
+
+def get_mlp(features, activate):
+    """features: mlp size of each layer, append activation in each layer except for the first layer."""
+    if isinstance(activate, str):
+        activate = getattr(nn, activate)
+    layers = []
+    for in_f, out_f in zip(features[:-1], features[1:]):
+        layers.append(nn.Linear(in_f, out_f))
+        layers.append(activate())
+    return nn.Sequential(*layers)
+
+class Reshape(nn.Module):
+    def __init__(self, args):
+        super(Reshape, self).__init__()
+        self.shape = args
+
+    def forward(self, x):
+        #print(self.shape)
+        shape = (x.shape[0], ) + self.shape
+        return torch.reshape(x, shape)
+    
+
+class Identity(nn.Module):
+    def __init__(self):
+        super(Identity, self).__init__()
+
+    def forward(self, *input):
+        if len(input) == 1:
+            return input[0]
+        return input
+
+
+class Topics(nn.Module):
+    def __init__(self, k, vocab_size, bias=True):
+        super(Topics, self).__init__()
+        self.k = k
+        self.vocab_size = vocab_size
+        self.topic = nn.Linear(k, vocab_size, bias=bias)
+
+    def forward(self, logit):
+        # return the log_prob of vocab distribution
+        return torch.log_softmax(self.topic(logit), dim=-1)
+
+    def get_topics(self):
+        return torch.softmax(self.topic.weight.data.transpose(0, 1), dim=-1)
+
+    def get_topic_word_logit(self):
+        """topic x V.
+        Return the logits instead of probability distribution
+        """
+        return self.topic.weight.transpose(0, 1)
+
+
+    def get_topics(self):
+        return self.topics.get_topics()
