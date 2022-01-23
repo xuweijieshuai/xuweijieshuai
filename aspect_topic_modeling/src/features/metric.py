@@ -1,6 +1,7 @@
 import numpy as np
-
-
+from collections import defaultdict
+from collections import Counter
+from collections import defaultdict
 #diversity
 def diversity(topics):
     div = []
@@ -53,3 +54,16 @@ def get_topic_coherence(data, topics, w2ind):
 #     print('num topics: ', len(TC))
     TC = np.mean(TC) / counter
     return TC
+
+def top_purity(labels_true, labels_pred):
+    pred = np.unique(labels_pred)
+    d = defaultdict(list)
+    for i, j in zip(labels_pred, labels_true):
+        d[i].append(j)
+    ct = []
+    for i in d:
+        ct += [Counter(d[i]).most_common(1)[0][1]]
+        #print(Counter(d[i]).most_common(1)[0], i, len(d[i]))
+    print(ct)
+    return np.sum(ct)/len(labels_pred)
+        

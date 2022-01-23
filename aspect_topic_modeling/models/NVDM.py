@@ -8,7 +8,10 @@ import sys
 #change to any directory you have to store the repo
 sys.path.insert(1, '/home/ec2-user/SageMaker/github/aspect_topic_modeling')
 from src.models.utils import get_wordnet_pos, remove_stopWords, get_emb, generate_emb, train, kld_normal, get_common_words, generate_bow
-
+from torch.nn.functional import normalize
+from hyperspherical_vae.distributions import VonMisesFisher
+from hyperspherical_vae.distributions import HypersphericalUniform
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def sinkhorn_torch(M, a, b, lambda_sh, numItermax=5000, stopThr=.5e-2, cuda=False):    
 
@@ -468,6 +471,68 @@ class Topics(nn.Module):
         """
         return self.topic.weight.transpose(0, 1)
 
+
+    def get_topics(self):
+        return self.topics.get_topics()
+
+class VNTM(nn.Module):
+    """NTM that keeps track of output
+    """
+    def __init__(self, hidden, normal, h_to_z, topics, layer, top_number, penalty):
+        super(VNTM, self).__init__()
+        self.hidden = hidden
+        #self.normal = normal
+        self.h_to_z = h_to_z
+        self.topics = topics
+        self.output = None
+        self.drop = nn.Dropout(p=0.5)
+        self.fc_mean = nn.Linear(layer, top_number)
+        self.fc_var = nn.Linear(layer, 1)
+        self.num = top_number
+        self.penalty = penalty
+        #self.dirichlet = torch.distributions.dirichlet.Dirichlet((torch.ones(self.topics.k)/self.topics.k).cuda())
+    def forward(self, x, n_sample=1, epoch = 0):
+        h = self.hidden(x)
+        h = self.drop(h)
+        z_mean = self.fc_mean(h)
+        z_mean = z_mean / z_mean.norm(dim=-1, keepdim=True)
+        # the `+ 1` prevent collapsing behaviors
+        z_var = F.softplus(self.fc_var(h)) + 1
+        
+        q_z = VonMisesFisher(z_mean, z_var)
+        p_z = HypersphericalUniform(self.num - 1, device=device)
+        kld = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
+        #print(q_z)
+        #mu, log_sigma = self.normal(h)
+        #identify how far it is away from normal distribution
+        
+        #print(kld.shape)
+        rec_loss = 0
+        for i in range(n_sample):
+            #reparametrician trick
+            z = q_z.rsample()
+            #z = nn.Softmax()(z)
+            #decode
+            #print(z)
+            
+            z = self.h_to_z(10 * z)
+            self.output = z
+            #print(z)
+            
+            #get log probability for reconstruction loss
+            log_prob = self.topics(z)
+            rec_loss = rec_loss - (log_prob * x).sum(dim=-1)
+        #average reconstruction loss
+        rec_loss = rec_loss / n_sample
+        #print(rec_loss.shape)
+        minus_elbo = rec_loss + kld
+        penalty, var, mean = topic_covariance_penalty(self.topics.topic_emb) 
+        return {
+            'loss': minus_elbo + penalty * self.penalty,
+            'minus_elbo': minus_elbo,
+            'rec_loss': rec_loss,
+            'kld': kld
+        }
 
     def get_topics(self):
         return self.topics.get_topics()
