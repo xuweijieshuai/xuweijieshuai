@@ -36,6 +36,9 @@ from sklearn import metrics
 from gensim.corpora.dictionary import Dictionary
 from gensim.models.coherencemodel import CoherenceModel
 from gensim.matutils import Sparse2Corpus
+import gc
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
 class GSM(NTM):
     def __init__(self, hidden, normal, h_to_z, topics, penalty):
         # h_to_z will output probabilities over topics
@@ -58,7 +61,9 @@ class GSM(NTM):
 
 def evaluate(topics, X, z, labels):
     result = []
-    result += sorted(diversity(topics))
+    result += [np.mean(diversity(topics))]
+    topics = [i[:10] for i in topics]
+    result += [np.mean(diversity(topics))]
 
 
     labels_pred = torch.argmax(z, 1).numpy()
@@ -69,7 +74,7 @@ def evaluate(topics, X, z, labels):
     corpus = Sparse2Corpus(X, documents_columns=False)
     #decoder_weight = self.autoencoder.decoder.linear.weight.detach().cpu()
     id2word = {index: str(index) for index in range(X.shape[1])}
-    texts = df.apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
+    
     cm = CoherenceModel(
                 topics=topics,
                 corpus=corpus,
@@ -85,7 +90,7 @@ def evaluate(topics, X, z, labels):
         coherence='c_npmi',
     )
 
-    result += sorted(cm.get_coherence_per_topic())
+    result += [cm.get_coherence()]
 
     cm = CoherenceModel(
         topics=topics,
@@ -95,7 +100,7 @@ def evaluate(topics, X, z, labels):
         coherence='c_v',
     )
 
-    result += sorted(cm.get_coherence_per_topic())
+    result += [cm.get_coherence()]
     return result
 
 def train(model, X, batch_size, epoch, optimizer, scheduler):
@@ -130,87 +135,146 @@ def train(model, X, batch_size, epoch, optimizer, scheduler):
         optimizer.step()
         scheduler.step()
     print(total_nll/length, total_kld/length)
-     
-data = fetch_20newsgroups(subset = 'all')
-df = pd.DataFrame()
-df['class'] = data['target']
-df['text'] = data['data']
-df['text'] = df.apply(lambda x: ' '.join(remove_stopWords(x['text'])), axis=1)
-df['clean_text']  = df.apply(lambda x: x['text'].split(), axis = 1)
+for dataset in ['20News', 'agnews', 'R8', 'dblp']:    
+    if dataset == '20News':
+        data = fetch_20newsgroups(subset = 'all')
+        df = pd.DataFrame()
+        df['class'] = data['target']
+        df['text'] = data['data']
+        df['text'] = df.apply(lambda x: ' '.join(remove_stopWords(x['text'])), axis=1)
+        df['clean_text']  = df.apply(lambda x: x['text'].split(), axis = 1)
 
-common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
-common_words = get_common_words(common_words_ct, ct = 200)
-word_track = {i: ind for ind, i in enumerate(common_words)}
-index_track = {ind: i for ind, i in enumerate(common_words)}
-df['index_num'] = df.apply(
-            lambda x: [word_track[i] for i in x['clean_text'] if i in word_track], axis=1)
-#change it to any location you save your embeddings
-vec = '/home/ec2-user/SageMaker/ORMCorpVoatp/ormcorpvoatp/ormcorpvoatp/data/Spherical-Text-Embedding/datasets/20news/jose.txt'
-embed = generate_emb(vec, common_words).cpu()
-X, indices = generate_bow(df = df, common_words = common_words)
-labels = df['class'].values
+        common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
+        common_words = get_common_words(common_words_ct, ct = 200)
+        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
+
+        word_track = {i: ind for ind, i in enumerate(common_words)}
+        index_track = {ind: i for ind, i in enumerate(common_words)}
+        df['index_num'] = df.apply(
+                    lambda x: [word_track[i] for i in x['clean_text'] if i in word_track], axis=1)
+        #change it to any location you save your embeddings
+        vec = '/home/ec2-user/SageMaker/ORMCorpVoatp/ormcorpvoatp/ormcorpvoatp/data/Spherical-Text-Embedding/datasets/20news/jose.txt'
+        embed = generate_emb(vec, common_words).cpu()
+        X, indices = generate_bow(df = df, common_words = common_words)
+        labels = df['class'].values
+        texts = df.apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
+    elif dataset == 'R8':
+        df1 = pd.read_csv('/home/ec2-user/SageMaker/github/aspect_topic_modeling/data/external/r8-test-stemmed.csv')
+        df2 = pd.read_csv('/home/ec2-user/SageMaker/github/aspect_topic_modeling/data/external/r8-train-stemmed.csv')
+        df = df1.append(df2)
+        df['clean_text']  = df.swifter.apply(lambda x: x['text'].split(), axis = 1)
+        common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
+        common_words = get_common_words(common_words_ct, ct = 200)
+        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
+        word_track = {i: ind for ind, i in enumerate(common_words)}
+        index_track = {ind: i for ind, i in enumerate(common_words)}
+        df['index_num'] = df.apply(
+                    lambda x: [word_track[i] for i in x['clean_text'] if i in word_track], axis=1)
+        df['class'] = df['intent']
+        #change it to any location you save your embeddings
+        vec = '/home/ec2-user/SageMaker/ORMCorpVoatp/ormcorpvoatp/ormcorpvoatp/data/Spherical-Text-Embedding/datasets/R8/jose.txt'
+        embed = generate_emb(vec, common_words).cpu()
+        X, indices = generate_bow(df = df, common_words = common_words)
+        labels = df['class'].values
+        texts = df.iloc[indices].apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
+    elif dataset == 'agnews':
+        #data import
+        df = pd.read_csv('https://raw.githubusercontent.com/yumeng5/WeSTClass/master/agnews/dataset.csv', 
+                           error_bad_lines=False,
+                           names = ['class', 'title', 'description'])
+        df['text'] = df.apply(lambda x: ' '.join(remove_stopWords(x['title'] + x['description'])), axis=1)
+        df['clean_text']  = df.apply(lambda x: x['text'].split(), axis = 1)
+        #get clean data
+        common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
+        common_words = get_common_words(common_words_ct, ct = 100)
+        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
+        word_track = {i: ind for ind, i in enumerate(common_words)}
+        index_track = {ind: i for ind, i in enumerate(common_words)}
+        df['index_num'] = df.apply(
+                    lambda x: [word_track[i] for i in x['clean_text'] if i in word_track], axis=1)
+        #change it to any location you save your embeddings
+        vec = '/home/ec2-user/SageMaker/ORMCorpVoatp/ormcorpvoatp/ormcorpvoatp/data/Spherical-Text-Embedding/datasets/agnews/jose.txt'
+        embed = generate_emb(vec, common_words).cpu()
+        X, indices = generate_bow(df = df, common_words = common_words)
+        labels = df['class'].values
+        texts = df.iloc[indices].apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
+    elif dataset == 'dblp':
+        news = pd.read_csv('/home/ec2-user/SageMaker/github/aspect_topic_modeling/data/external/corpusbibitex.tsv',  sep = '\t',
+                       error_bad_lines=False,
+                       names = ['text', 'train', 'class'])
+        #change it to any location you save your embeddings
+        #news = news.groupby('class').head(4500)
+        news['clean_text']  = news.apply(lambda x: x['text'].split(), axis = 1)
+        #get clean data
+        common_words_ct = Counter([j for i in news['clean_text'].values for j in i])
+        common_words = get_common_words(common_words_ct, ct = 50) #this vocab
+        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
+
+        word_track = {i: ind for ind, i in enumerate(common_words)} #word dict
+        index_track = {ind: i for ind, i in enumerate(common_words)} 
+        news['index_num'] = news.swifter.apply(
+                    lambda x: [word_track[i] for i in x['clean_text'] if i in word_track], axis=1)
+
+        vec = '/home/ec2-user/SageMaker/ORMCorpVoatp/ormcorpvoatp/ormcorpvoatp/data/Spherical-Text-Embedding/datasets/bibi/jose.txt'
+        embed = generate_emb(vec, common_words).cpu()
+        X, indices = generate_bow(df = news, common_words = common_words)
+        labels = news.iloc[indices]['class'].values
+        texts = news.iloc[indices].apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
+
+    pdf = []
+    for penalty in [0.5, 1, 2, 5, 10]:
+        for numb_embeddings in [5, 10, 20, 30, 40, 50]:
+                    gc.collect()
+                    result = [penalty, numb_embeddings] 
+
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+                    layer = 64
+                    hidden = get_mlp([X.shape[1], layer], nn.ReLU)
+                    normal = NormalParameter(layer, numb_embeddings)
+                    h_to_z = nn.Softmax()
+                    embedding = nn.Embedding(X.shape[1], 50)
+                    # p1d = (0, 0, 0, 10000 - company1.embeddings.shape[0]) # pad last dim by 1 on each side
+                    # out = F.pad(company1.embeddings, p1d, "constant", 0)  # effectively zero padding
+
+                    embedding.weight = torch.nn.Parameter(torch.ones(embed.float().shape))
+                    embedding.weight.requires_grad=True
+                    topics = EmbTopic(embedding = embedding,
+                                      k = numb_embeddings, normalize = False)
 
 
 
-from models.NVDM import Topics
-import gc
-pdf = []
-for iii in range(10):
-    #labels = [[120], [1527], [1646], [2047], [727], [1624], [36], [32], [26], [92], [907], [652]]
-    for penalty in [0.1, 0.2, 0.5, 1, 2, 5]:
-        result = [penalty] 
-        numb_embeddings = 20
-        torch.cuda.empty_cache()
-        gc.collect()
-        hidden = get_mlp([X.shape[1], 64], nn.ReLU)
-        normal = NormalParameter(64, numb_embeddings)
-        h_to_z = nn.Softmax()
-        embedding = nn.Embedding(X.shape[1], 50)
-        # p1d = (0, 0, 0, 10000 - company1.embeddings.shape[0]) # pad last dim by 1 on each side
-        # out = F.pad(company1.embeddings, p1d, "constant", 0)  # effectively zero padding
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        embedding.weight = torch.nn.Parameter(torch.ones(embed.shape))
-        # embedding.weight.requires_grad=False
-        #embedding.weight = torch.nn.Parameter()
-        embedding.weight.requires_grad=True
-        topics = EmbTopic(embedding = embedding,
 
-                          k = numb_embeddings, normalize = False)
+                    model = GSM(hidden = hidden,
+                                normal = normal,
+                                h_to_z = h_to_z,
+                                topics = topics,
+                                penalty = penalty
+                                ).to(device).float()
+                    # larger hidden size make topics more diverse
+                    #num_docs_train = 996318
+                    batch_size = 256
+                    optimizer = optim.Adam(model.parameters(), 
+                                           lr=0.002, 
+                                           weight_decay=1.2e-6)
 
 
 
+                    epochs = 20
+                    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.002, steps_per_epoch=int(X.shape[0]/batch_size) + 1, epochs=epochs)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-        model = GSM(hidden = hidden,
-                    normal = normal,
-                    h_to_z = h_to_z,
-                    topics = topics,
-                    penalty = 0.5
-                    ).to(device).float()
-        # larger hidden size make topics more diverse
-        #num_docs_train = 996318
-        batch_size = 256
-        optimizer = optim.Adam(model.parameters(), 
-                               lr=0.002, 
-                               weight_decay=1.2e-6)
-
-
-
-        epochs = 20
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.002, steps_per_epoch=int(X.shape[0]/batch_size) + 1, epochs=epochs)
-
-        for epoch in range(epochs):
-            train(model, X,  batch_size, epoch, optimizer, scheduler)
-        emb = model.topics.get_topics().cpu().detach().numpy()
-        topics =  [[str(ind) for ind in np.argsort(emb[i])[::-1][:25] ] for i in range(numb_embeddings)]
-        data_batch = torch.from_numpy(X.toarray()).float()
-        model.cpu()
-        h = model.hidden(data_batch)
-        h = model.drop(h)
-        mu, log_sigma = model.normal(h)
-        z = model.h_to_z(mu)
-        result += evaluate(topics, X, z, labels)
-        pdf += [result]
-        pd.DataFrame(pdf).to_csv('gsm_result.csv')
+                    for epoch in range(epochs):
+                        train(model, X,  batch_size, epoch, optimizer, scheduler)
+                    emb = model.topics.get_topics().cpu().detach().numpy()
+                    topics =  [[str(ind) for ind in np.argsort(emb[i])[::-1][:25] ] for i in range(numb_embeddings)]
+                    data_batch = torch.from_numpy(X.toarray()).float()
+                    model.cpu()
+                    h = model.hidden(data_batch)
+                    h = model.drop(h)
+                    mu, log_sigma = model.normal(h)
+                    z = model.h_to_z(mu)
+                    result += evaluate(topics, X, z, labels)
+                    pdf += [result]
+                    pd.DataFrame(pdf).to_csv('gsm_result0' + dataset + '.csv')

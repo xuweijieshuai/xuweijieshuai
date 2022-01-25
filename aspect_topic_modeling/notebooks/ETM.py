@@ -37,13 +37,33 @@ from gensim.corpora.dictionary import Dictionary
 from gensim.models.coherencemodel import CoherenceModel
 from gensim.matutils import Sparse2Corpus
 import gc
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+class GSM(NTM):
+    def __init__(self, hidden, normal, h_to_z, topics, penalty):
+        # h_to_z will output probabilities over topics
+        super(GSM, self).__init__(hidden, normal, h_to_z, topics)
+        self.penalty = penalty
+
+    def forward(self, x, n_sample=1):
+        stat = super(GSM, self).forward(x, n_sample)
+        loss = stat['loss']
+        penalty, var, mean = topic_covariance_penalty(self.topics.topic_emb)
+
+        stat.update({
+            'loss': loss + penalty * self.penalty,
+            'penalty_mean': mean,
+            'penalty_var': var,
+            'penalty': penalty * self.penalty,
+        })
+
+        return stat
 
 def evaluate(topics, X, z, labels):
     result = []
     result += [np.mean(diversity(topics))]
     topics = [i[:10] for i in topics]
     result += [np.mean(diversity(topics))]
+
 
     labels_pred = torch.argmax(z, 1).numpy()
     labels_true = labels
@@ -125,7 +145,6 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
 
         common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
         common_words = get_common_words(common_words_ct, ct = 200)
-        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
         word_track = {i: ind for ind, i in enumerate(common_words)}
         index_track = {ind: i for ind, i in enumerate(common_words)}
         df['index_num'] = df.apply(
@@ -143,7 +162,6 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
         df['clean_text']  = df.swifter.apply(lambda x: x['text'].split(), axis = 1)
         common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
         common_words = get_common_words(common_words_ct, ct = 200)
-        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
         word_track = {i: ind for ind, i in enumerate(common_words)}
         index_track = {ind: i for ind, i in enumerate(common_words)}
         df['index_num'] = df.apply(
@@ -165,7 +183,6 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
         #get clean data
         common_words_ct = Counter([j for i in df['clean_text'].values for j in i])
         common_words = get_common_words(common_words_ct, ct = 100)
-        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
         word_track = {i: ind for ind, i in enumerate(common_words)}
         index_track = {ind: i for ind, i in enumerate(common_words)}
         df['index_num'] = df.apply(
@@ -186,7 +203,6 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
         #get clean data
         common_words_ct = Counter([j for i in news['clean_text'].values for j in i])
         common_words = get_common_words(common_words_ct, ct = 50) #this vocab
-        common_words = [i for i in common_words if i not in ENGLISH_STOP_WORDS and common_words_ct[i] < df.shape[0] * 0.15 and len(i) >= 3]
         word_track = {i: ind for ind, i in enumerate(common_words)} #word dict
         index_track = {ind: i for ind, i in enumerate(common_words)} 
         news['index_num'] = news.swifter.apply(
@@ -215,7 +231,7 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
                     # out = F.pad(company1.embeddings, p1d, "constant", 0)  # effectively zero padding
 
                     embedding.weight = torch.nn.Parameter(torch.Tensor(embed.float()))
-                    embedding.weight.requires_grad=False
+                    embedding.weight.requires_grad=True
                     topics = EmbTopic(embedding = embedding,
                                       k = numb_embeddings, normalize = False)
 
@@ -224,13 +240,11 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
                     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-                    model = VNTM(hidden = hidden,
+                    model = GSM(hidden = hidden,
                                 normal = normal,
                                 h_to_z = h_to_z,
                                 topics = topics,
-                                layer = layer, 
-                                top_number = numb_embeddings,
-                                penalty = penalty
+                                penalty = 0
                                 ).to(device).float()
                     # larger hidden size make topics more diverse
                     #num_docs_train = 996318
@@ -239,25 +253,21 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
                                            lr=0.002, 
                                            weight_decay=1.2e-6)
 
-                    epochs = 20
-                    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.05, steps_per_epoch=int(X.shape[0]/batch_size) + 1, epochs=epochs)
 
+
+                    epochs = 20
+                    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.002, steps_per_epoch=int(X.shape[0]/batch_size) + 1, epochs=epochs)
 
                     for epoch in range(epochs):
                         train(model, X,  batch_size, epoch, optimizer, scheduler)
-                    #Add Diversity
                     emb = model.topics.get_topics().cpu().detach().numpy()
                     topics =  [[str(ind) for ind in np.argsort(emb[i])[::-1][:25] ] for i in range(numb_embeddings)]
-                        #Add purity . 
                     data_batch = torch.from_numpy(X.toarray()).float()
                     model.cpu()
-                    z = model.hidden(data_batch)
-                    z_mean = model.fc_mean(z)
-                    z_mean = z_mean / z_mean.norm(dim=-1, keepdim=True)
-                    z = model.h_to_z(z_mean)
-
+                    h = model.hidden(data_batch)
+                    h = model.drop(h)
+                    mu, log_sigma = model.normal(h)
+                    z = model.h_to_z(mu)
                     result += evaluate(topics, X, z, labels)
                     pdf += [result]
-                    pd.DataFrame(pdf).to_csv('vntm_result_'+dataset+'.csv')
-
-
+                    pd.DataFrame(pdf).to_csv('gsm_result' + dataset + '.csv')

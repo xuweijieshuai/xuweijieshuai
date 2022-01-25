@@ -38,7 +38,71 @@ from gensim.models.coherencemodel import CoherenceModel
 from gensim.matutils import Sparse2Corpus
 import gc
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+class VNTM(nn.Module):
+    """NTM that keeps track of output
+    """
+    def __init__(self, hidden, normal, h_to_z, topics, layer, top_number, penalty, K = 100):
+        super(VNTM, self).__init__()
+        self.hidden = hidden
+        #self.normal = normal
+        self.h_to_z = h_to_z
+        self.topics = topics
+        self.output = None
+        self.drop = nn.Dropout(p=0.5)
+        self.fc_mean = nn.Linear(layer, top_number)
+        self.fc_var = K
+        self.num = top_number
+        self.penalty = penalty
+        #self.dirichlet = torch.distributions.dirichlet.Dirichlet((torch.ones(self.topics.k)/self.topics.k).cuda())
+    def forward(self, x, n_sample=1, epoch = 0):
+        h = self.hidden(x)
+        h = self.drop(h)
+        z_mean = self.fc_mean(h)
+        z_mean = z_mean / z_mean.norm(dim=-1, keepdim=True)
+        # the `+ 1` prevent collapsing behaviors
+        #z_var = F.softplus(self.fc_var(h)) + 1
+        #print(z_mean)
+        
+        
+        q_z = VonMisesFisher(z_mean, torch.ones(x.shape[0], 1).to(device) * self.fc_var)
+        p_z = HypersphericalUniform(self.num - 1, device=device)
+        kld = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
+        #print(q_z)
+        #mu, log_sigma = self.normal(h)
+        #identify how far it is away from normal distribution
+        
+        #print(kld.shape)
+        rec_loss = 0
+        for i in range(n_sample):
+            #reparametrician trick
+            z = q_z.rsample()
+            #z = nn.Softmax()(z)
+            #decode
+            #print(z)
+            
+            z = self.h_to_z(z)
+            self.output = z
+            #print(z)
+            
+            #get log probability for reconstruction loss
+            log_prob = self.topics(z)
+            rec_loss = rec_loss - (log_prob * x).sum(dim=-1)
+        #average reconstruction loss
+        rec_loss = rec_loss / n_sample
+        #print(rec_loss.shape)
+        minus_elbo = rec_loss + kld
+        penalty, var, mean = topic_covariance_penalty(self.topics.topic_emb) 
+        return {
+            'loss': minus_elbo + penalty * self.penalty,
+            'minus_elbo': minus_elbo,
+            'rec_loss': rec_loss,
+            'kld': kld
+        }
 
+    def get_topics(self):
+        return self.topics.get_topics()
+
+    
 def evaluate(topics, X, z, labels):
     result = []
     result += [np.mean(diversity(topics))]
@@ -199,7 +263,7 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
         texts = news.iloc[indices].apply(lambda x:[str(i) for i in x['index_num']], axis = 1).values
 
     pdf = []
-    for penalty in [0.5, 1, 2, 5, 10]:
+    for penalty in [0]:
         for numb_embeddings in [5, 10, 20, 30, 40, 50]:
                     gc.collect()
                     result = [penalty, numb_embeddings] 
@@ -214,8 +278,8 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
                     # p1d = (0, 0, 0, 10000 - company1.embeddings.shape[0]) # pad last dim by 1 on each side
                     # out = F.pad(company1.embeddings, p1d, "constant", 0)  # effectively zero padding
 
-                    embedding.weight = torch.nn.Parameter(torch.Tensor(embed.float()))
-                    embedding.weight.requires_grad=False
+                    embedding.weight = torch.nn.Parameter(torch.ones(embed.float().shape))
+                    embedding.weight.requires_grad=True
                     topics = EmbTopic(embedding = embedding,
                                       k = numb_embeddings, normalize = False)
 
@@ -230,7 +294,8 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
                                 topics = topics,
                                 layer = layer, 
                                 top_number = numb_embeddings,
-                                penalty = penalty
+                                penalty = penalty,
+                                K = 100
                                 ).to(device).float()
                     # larger hidden size make topics more diverse
                     #num_docs_train = 996318
@@ -258,6 +323,6 @@ for dataset in ['20News', 'agnews', 'R8', 'dblp']:
 
                     result += evaluate(topics, X, z, labels)
                     pdf += [result]
-                    pd.DataFrame(pdf).to_csv('vntm_result_'+dataset+'.csv')
+                    pd.DataFrame(pdf).to_csv('vnvdm_result_'+dataset+'.csv')
 
 
